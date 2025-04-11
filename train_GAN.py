@@ -22,8 +22,7 @@ import torch.distributed as dist
 import torch.utils.data.distributed
 from torch.utils import data
 import os
-from MITBIH import *
-from load_dataset import my_dataset, load_SLC
+from load_dataset import load_SLC
 import numpy as np
 import torch.nn as nn
 # from tensorboardX import SummaryWriter
@@ -36,26 +35,6 @@ import matplotlib.pyplot as plt
 import io
 import PIL.Image
 from torchvision.transforms import ToTensor
-from metrics import feature_extract, cos_similarity, visualization
-
-os.chdir('/media/lscsc/nas/xiangyu/Compare/autoformer_g_2b_SE')
-
-class TrainingDataset(data.Dataset):
-    """
-    Custom PyTorch Dataset for training with conditional data.
-    """
-    def __init__(self, filename, class_id):
-        self.cond_ECG = mitbih_masked(filename=filename, class_id=class_id)
-
-    def __len__(self):
-        return len(self.cond_ECG)
-
-    def __getitem__(self, idx):
-        data_dict = {
-            'org_data': self.cond_ECG[idx]['org_data'],
-            'cond_data': self.cond_ECG[idx]['cond_data']
-        }
-        return self.cond_ECG[idx]['org_data'].reshape([1,1,128]), 1
     
 # torch.backends.cudnn.enabled = True
 # torch.backends.cudnn.benchmark = True
@@ -65,7 +44,7 @@ def load_args():
     args.syn_len = 128
     args.gen_bs = 16 
     args.dis_bs = 16 
-    args.dataset = 'heartbeat' 
+    args.dataset = 'SLC' 
     args.bottom_width = 8 
     args.max_iter = 50000 * 4
     args.img_size = 32 
@@ -100,8 +79,8 @@ def load_args():
     args.ema_warmup = 0.1 
     args.ema = 0.9999 
     args.diff_aug = 'translation,cutout,color' 
-    args.class_name = 'heartbeat'
-    args.exp_name = 'heartbeat'
+    args.class_name = 'SLC'
+    args.exp_name = 'SLC'
 
     return args
 
@@ -196,23 +175,10 @@ def main_worker(gpu, ngpus_per_node, args):
     # epoch number for dis_net
     args.max_epoch = args.max_epoch * args.n_critic
 
-    
-    # train_set = unimib_load_dataset(incl_xyz_accel = True, incl_rms_accel = False, incl_val_group = False, is_normalize = True, one_hot_encode = False, data_mode = 'Train', single_class = True, class_name = args.class_name, augment_times=args.augment_times)
-    # train_loader = data.DataLoader(train_set, batch_size=args.batch_size, num_workers=args.num_workers, shuffle = True)
-    # test_set = unimib_load_dataset(incl_xyz_accel = True, incl_rms_accel = False, incl_val_group = False, is_normalize = True, one_hot_encode = False, data_mode = 'Test', single_class = True, class_name = args.class_name)
-    # test_loader = data.DataLoader(test_set, batch_size=args.batch_size, num_workers=args.num_workers, shuffle = True)
 
-    # train_set = load_Cinc_ECG(syn_len=args.syn_len)
-    # train_loader = data.DataLoader(train_set, batch_size=args.batch_size, num_workers=args.num_workers, shuffle = True)
+    train_set = load_SLC(is_shuffle=True, is_normalize=True)
+    train_loader = data.DataLoader(train_set, batch_size=args.batch_size, num_workers=args.num_workers, shuffle = True)
     
-    train_set = TrainingDataset(filename="/media/lscsc/nas/xiangyu/biodiffusion/heartbeat/mitbih_train.csv", class_id=0)
-    train_loader = data.DataLoader(train_set, batch_size=args.batch_size, num_workers=4, shuffle=True)
-
-    # train_set = load_SLC(is_shuffle=True, is_normalize=True)
-    # train_loader = data.DataLoader(train_set, batch_size=args.batch_size, num_workers=args.num_workers, shuffle = True)
-    
-    #train_set = my_dataset()
-    #train_loader = data.DataLoader(train_set, batch_size=args.batch_size, num_workers=args.num_workers, shuffle = True)
     
     # extract features of real data
     real_data = []
@@ -229,23 +195,6 @@ def main_worker(gpu, ngpus_per_node, args):
     trend1 = torch.mean(trend1, axis=0)
     trend2 = trend2.to(args.gpu)
     trend2 = torch.mean(trend2, axis=0)
-    c = real_data.shape[-1]
-    for i in range(c):
-        f_real_i = feature_extract(real_data[:,:,i])
-        f_real.append(f_real_i)
-    
-    f_real = np.array(f_real, dtype=np.float32)
-    f_real = np.mean(f_real, axis=1)
-
-
-    # visualize real data
-    idx = np.random.randint(0,len(train_set),6)
-    sample = []
-    for i in range(6):
-        d,l = train_set[idx[i]]
-        sample.append(d)
-    sample = np.asarray(sample)
-    #plotting(args,None,None,data=sample,real=True)
 
     print(len(train_loader))
     
@@ -307,7 +256,6 @@ def main_worker(gpu, ngpus_per_node, args):
     }
 
     # train loop
-    best_js_dist = 10
     best_epoch = 0
     for epoch in range(int(start_epoch), int(args.max_epoch)):
 #         train_sampler.set_epoch(epoch)
@@ -331,30 +279,6 @@ def main_worker(gpu, ngpus_per_node, args):
 
             syn_data[gen_i*100: (gen_i+1)*100] = syn_data_i
 
-        f_syn = []
-        for i in range(c):
-            f_syn_i = feature_extract(syn_data[:,:,i])
-            f_syn.append(f_syn_i)
-        f_syn = np.array(f_syn, dtype=np.float32)
-
-        # compute js distance
-        js_dist = 0
-        for i in range(c):
-            for j in range(1000):
-                js_dist += distance.jensenshannon(np.abs(f_real[i]), np.abs(f_syn[i,j]))
-        
-        js_dist /= c*1000
-
-
-        if js_dist < best_js_dist and epoch > 10:
-            best_js_dist = js_dist
-            best_epoch = epoch
-            is_best = True
-            np.save('saved/best_data.npy',syn_data)
-            print('best js distance:', best_js_dist)
-        else:
-            is_best = False
-
         #if epoch % 5 == 0:
         #    plotting(args,gen_net,epoch,trend1,trend2)
 
@@ -363,58 +287,12 @@ def main_worker(gpu, ngpus_per_node, args):
 
         save_checkpoint({
             'best_epoch': best_epoch,
-            'best_js_distance': best_js_dist,
             'gen_model': gen_net,
             'dis_model': dis_net,
             'gen_optimizer': gen_optimizer.state_dict(),
             'dis_optimizer': dis_optimizer.state_dict()
-        }, is_best, 'models', filename="checkpoint_"+str(epoch)+".pth")
+        }, 'models', filename="checkpoint_"+str(epoch)+".pth")
         
-
-def plotting(args,gen_net,epoch,trend1=None,trend2=None,data=None,real=False):
-    if real:
-        for i in range(6):
-            #n = 0 if i < 3 else 1
-            plt.subplot(3,2,i+1)
-            #plt.plot(data[n,i-3*n,0,:75])
-            plt.plot(data[i,0,0,:])
-        plt.savefig('plots/'+'real_data.png')
-        plt.close()
-        plt.clf()
-    else:
-        gen_net.eval()
-        gen_z = torch.from_numpy(np.random.normal(0, 1, (6, args.latent_dim))).to(args.gpu).float()
-        gen_imgs = gen_net(gen_z,trend1,trend2).cpu()
-        gen_imgs = gen_imgs.detach().numpy()
-        for i in range(6):
-            #n = 0 if i < 3 else 1
-            plt.subplot(3,2,i+1)
-            #plt.plot(gen_imgs[n,i-3*n,0,:75])
-            plt.plot(gen_imgs[i,0,0,:])
-        plt.savefig('plots/'+'generated_data_'+str(epoch)+'.png')
-        plt.close()
-        plt.clf()
-
-def gen_plot(gen_net, epoch, class_name):
-    """Create a pyplot plot and save to buffer."""
-    synthetic_data = [] 
-
-    for i in range(10):
-        fake_noise = torch.FloatTensor(np.random.normal(0, 1, (1, 100)))
-        fake_sigs = gen_net(fake_noise).to('cpu').detach().numpy()
-        synthetic_data.append(fake_sigs)
-
-    fig, axs = plt.subplots(2, 5, figsize=(20,5))
-    fig.suptitle(f'Synthetic {class_name} at epoch {epoch}', fontsize=30)
-    for i in range(2):
-        for j in range(5):
-            axs[i, j].plot(synthetic_data[i*5+j][0][0][0][:])
-            axs[i, j].plot(synthetic_data[i*5+j][0][1][0][:])
-            axs[i, j].plot(synthetic_data[i*5+j][0][2][0][:])
-    buf = io.BytesIO()
-    plt.savefig(buf, format='jpeg')
-    buf.seek(0)
-    return buf
 
 if __name__ == '__main__':
     main()
